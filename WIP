@@ -1,0 +1,153 @@
+# if on VSCODE install "Colorful Comments" extension
+
+# data science
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+
+#util
+import time
+from collections import defaultdict, deque
+import re #REGEX!!
+from datetime import datetime, UTC #? not needed?(?)
+
+
+# AIS parser
+from pyais.stream import FileReaderStream
+
+#! Use regression model as its simple, optimaly use "kalman filter" model
+
+#* PARAMS
+#* =====================================
+
+filename = "ais_log/Log_2025-09-23.log"
+threshold = 2.0 # responsible for the resonsivness of regression model, finetune it, idk
+
+#* --------------------------------
+
+
+
+#? 1, 2, 3	Class A vessels (cargo, tankers, etc.)—frequent updates every 2–10 seconds depending on speed and maneuvering
+#? 18, 19	Class B vessels (fishing boats, yachts)—less frequent, but still useful for local traffic
+allowed_types = {1, 2, 3, 18, 19} # AIS data type format, - optimal for lon/lat data
+allowed_types2 = {1,2,3} # Contains only big vessels #! Honestly just assume were tracking only 1,2,3 - small vessels dont matter
+
+vessel_positions = defaultdict(lambda: deque(maxlen=10)) #& Deletes oldest entry if gets new
+timestamp_pattern = re.compile(r'c:(\d+)\*') #regex pattern for 
+
+loop_counter = 0
+def main():
+    with FileReaderStream(filename) as stream:
+        for msg in stream:
+            decoded = msg.decode()
+            
+            #Search for reliable type for data
+            if decoded is None or decoded.msg_type not in allowed_types: #& Skip unused types
+                continue
+            
+            #* COLLECTING DATA!
+
+            mmsi = decoded.mmsi #^ MMSI - Maritime Mobile Service Identity—primary vessel identifier across all AIS types
+            lon = getattr(decoded, 'lon', None)
+            lat = getattr(decoded, 'lat', None)
+
+            #time
+            raw = msg.raw.decode(errors='ignore')
+            match = timestamp_pattern.search(raw)
+            timestamp = None
+            if match:
+                unix_ts = int(match.group(1))
+                timestamp = datetime.fromtimestamp(unix_ts, tz=UTC)
+            print(f"Extracted timestamp: {timestamp} from raw: {raw}")
+
+            #~if lon is None or lat is None or timestamp is None: #Edge case, missing data
+            #~    continue
+            
+            #! PROBLEM IS UNIX TIMESTAMP IS NOT CONSIDERED AS ONLY PAST !AIVDM RECOGNIZED
+                        #! PROBLEM IS UNIX TIMESTAMP IS NOT CONSIDERED AS ONLY PAST !AIVDM RECOGNIZED
+                                    #! PROBLEM IS UNIX TIMESTAMP IS NOT CONSIDERED AS ONLY PAST !AIVDM RECOGNIZED
+
+            missing = []
+            if lon is None:
+                missing.append("lon")
+            if lat is None:
+                missing.append("lat")
+            if timestamp is None:
+                missing.append("timestamp")
+            time.sleep(1)
+            if missing:
+                print(f"⚠️ Missing fields for MMSI {decoded.mmsi}: {', '.join(missing)}")
+                continue
+            
+            print("i work2")
+
+            #* LOGGING DATA!
+
+            vessel_positions[mmsi].append((timestamp, lon, lat)) #appends deleting oldest position
+
+            #* WORK WITH DATA!
+
+            # use regression once we hit 10 positions -> 9 positions used to check 10th position.
+            if len(vessel_positions[mmsi]) == 10:
+                if invoke_regression(vessel_positions[mmsi],threshold):
+                    print(f"⚠️ Anomaly detected for MMSI {mmsi}")
+                else:
+                    print(f"✅ Normal movement for MMSI {mmsi}")
+                #~ print(f"MMSI {mmsi}: {vessel_positions[mmsi]}")
+                
+            
+            #~ print(decoded)
+            #~ time.sleep(1)
+            
+
+            #&Log unique MMSI and group it in lists, keep last 9, predicting if 10th is correct or spoofed
+
+def invoke_regression(buffer, threshold=2.0): 
+    """
+    Detects if the 10th position in a rolling buffer is anomalous.
+    
+    Parameters:
+        buffer (deque): deque of 10 (timestamp, lon, lat) tuples
+        threshold (float): number of std deviations to define anomaly
+
+    Returns:
+        bool: True if anomaly detected, False otherwise
+    """
+    if len(buffer) != 10:
+        return False  # Not enough data to evaluate
+
+    # Extract time, lon, lat from first 9 entries
+    times = np.array([entry[0].timestamp() for entry in list(buffer)[:9]]).reshape(-1, 1)
+    lons = np.array([entry[1] for entry in list(buffer)[:9]])
+    lats = np.array([entry[2] for entry in list(buffer)[:9]])
+
+    # Fit linear models #? Take time, divide distance by seconds - some signals take from 2s to 10s
+    lon_model = LinearRegression().fit(times, lons)
+    lat_model = LinearRegression().fit(times, lats)
+
+    # Predict 10th position
+    t10 = buffer[9][0].timestamp()
+    pred_lon = lon_model.predict([[t10]])[0]
+    pred_lat = lat_model.predict([[t10]])[0]
+
+    # Actual 10th position
+    actual_lon = buffer[9][1]
+    actual_lat = buffer[9][2]
+
+    # Compute residuals
+    lon_error = abs(pred_lon - actual_lon)
+    lat_error = abs(pred_lat - actual_lat)
+
+    # Estimate std deviation from training residuals
+    lon_std = np.std(lons - lon_model.predict(times))
+    lat_std = np.std(lats - lat_model.predict(times))
+
+    # Flag if deviation exceeds threshold
+    return lon_error > threshold * lon_std or lat_error > threshold * lat_std
+
+def delete_depriciated_mmsi(): #cleanup vessel data as last unix time is > hour. Call every X loops
+    pass
+        
+if __name__ == "__main__":
+    main()
